@@ -199,8 +199,50 @@ export default function PortableSyncSettings({ mode = 'all' }) {
             const { createSnapshot } = await import('../lib/snapshots');
             await createSnapshot(text('从 WebDAV 同步前的备份', 'Backup before WebDAV pull', 'Резервная копия перед загрузкой из WebDAV'), 'manual', { syncLatestToCloud: false });
             await saveSettings({ savePassword: !!password });
-            const count = await sync.pullAllFromWebDav();
-            showToast(text(`已从 WebDAV 拉取 ${count} 项数据，即将刷新`, `Pulled ${count} items from WebDAV. Refreshing soon`, `Загружено элементов из WebDAV: ${count}. Скоро обновление`), 'success');
+            const { count, manifestMissing, manifestInvalid, manifestKeys, skipped, basePath } = await sync.pullAllFromWebDav();
+            // 拉到 0 项不等于成功。清单找不到、清单格式不认识、清单列了却读不到，
+            // 三种情况都会是 0；一律报成功会让用户以为数据已经同步过来了。
+            if (manifestMissing) {
+                showToast(text(
+                    `未在 WebDAV 找到同步清单（目录 ${basePath}），没有拉取任何数据。请确认本机的 WebDAV 地址、账号和同步目录与其他设备完全一致。`,
+                    `No sync manifest found on WebDAV (folder ${basePath}); nothing was pulled. Check that this device's WebDAV address, account, and sync folder match your other devices.`,
+                    `Манифест синхронизации не найден на WebDAV (папка ${basePath}); ничего не загружено. Проверьте, что адрес, учётная запись и папка WebDAV совпадают с другими устройствами.`
+                ), 'error');
+                return;
+            }
+            if (manifestInvalid) {
+                showToast(text(
+                    'WebDAV 上的同步清单格式无法识别，没有拉取任何数据。',
+                    'The sync manifest on WebDAV is in an unrecognized format; nothing was pulled.',
+                    'Формат манифеста синхронизации на WebDAV не распознан; ничего не загружено.'
+                ), 'error');
+                return;
+            }
+            if (manifestKeys === 0) {
+                showToast(text(
+                    '远端同步清单是空的，其他设备还没有推送过数据。',
+                    'The remote sync manifest is empty; no device has pushed data yet.',
+                    'Удалённый манифест синхронизации пуст; ни одно устройство ещё не отправляло данные.'
+                ), 'info');
+                return;
+            }
+            if (count === 0) {
+                showToast(text(
+                    `同步清单列出 ${manifestKeys} 项，但一项都没能读取（${skipped.length} 项失败），没有拉取任何数据。`,
+                    `The manifest lists ${manifestKeys} items but none could be read (${skipped.length} failed); nothing was pulled.`,
+                    `Манифест содержит ${manifestKeys} элементов, но ни один не удалось прочитать (сбоев: ${skipped.length}); ничего не загружено.`
+                ), 'error');
+                return;
+            }
+            if (skipped.length > 0) {
+                showToast(text(
+                    `已拉取 ${count} 项，另有 ${skipped.length} 项读取失败，即将刷新`,
+                    `Pulled ${count} items; ${skipped.length} could not be read. Refreshing soon`,
+                    `Загружено ${count}; не удалось прочитать: ${skipped.length}. Скоро обновление`
+                ), 'error');
+            } else {
+                showToast(text(`已从 WebDAV 拉取 ${count} 项数据，即将刷新`, `Pulled ${count} items from WebDAV. Refreshing soon`, `Загружено элементов из WebDAV: ${count}. Скоро обновление`), 'success');
+            }
             setTimeout(() => window.location.reload(), 1200);
         }).catch(err => showToast(err.message, 'error'));
     };

@@ -48,6 +48,14 @@ const WEBDAV_PRESETS = {
     },
 };
 
+// 诊断：同步失败必须留下可追查的证据，但诊断本身绝不能让同步失败，
+// 因此一律动态载入并吞掉自身错误。
+function recordSyncDiagnostic(event, message, metadata, level = 'info') {
+    import('./diagnostics')
+        .then(({ recordDiagnosticEvent }) => recordDiagnosticEvent(event, message, metadata, level))
+        .catch(() => {});
+}
+
 const _pendingWrites = new Map();
 const _statusListeners = new Set();
 let _syncTimer = null;
@@ -255,24 +263,51 @@ function assertWebDavConfig(config) {
 
 async function webdavProxy(action, config, extra = {}) {
     assertWebDavConfig(config);
-    const res = await fetch(apiPath('/api/sync/webdav'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-            action,
-            path: extra.path || '',
-            body: extra.body,
-            config: {
-                endpoint: config.endpoint,
-                username: config.username,
-                password: config.password,
-            },
-        }),
+    const started = Date.now();
+    const requestBody = JSON.stringify({
+        action,
+        path: extra.path || '',
+        body: extra.body,
+        config: {
+            endpoint: config.endpoint,
+            username: config.username,
+            password: config.password,
+        },
     });
+    let res;
+    try {
+        res = await fetch(apiPath('/api/sync/webdav'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: requestBody,
+        });
+    } catch (err) {
+        // 请求没送到本站服务端（离线、被拦截），与上游 WebDAV 失败是两类问题。
+        recordSyncDiagnostic('sync.webdav.request', 'WebDAV 代理请求未送达', {
+            action, path: extra.path || '', requestChars: requestBody.length, ms: Date.now() - started,
+        }, 'error');
+        throw err;
+    }
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.error) {
-        throw new Error(data.error || `WebDAV ${action} failed`);
+        recordSyncDiagnostic('sync.webdav.request', 'WebDAV 请求失败', {
+            action, path: extra.path || '', status: res.status, code: data.code || '',
+            upstreamStatus: data.upstreamStatus ?? null,
+            requestChars: requestBody.length, ms: Date.now() - started,
+        }, 'error');
+        // 服务端拿不到界面语言，只能回中文兜底 + 机器码；这里按 code 出三语文案。
+        const error = new Error(localizeApiError(data, tt) || `WebDAV ${action} failed`);
+        error.code = data.code || '';
+        error.upstreamStatus = data.upstreamStatus ?? null;
+        throw error;
+    }
+    if (action === 'get') {
+        recordSyncDiagnostic('sync.webdav.get', 'WebDAV 读取完成', {
+            path: extra.path || '', missing: !!data.missing,
+            responseChars: typeof data.body === 'string' ? data.body.length : 0,
+            ms: Date.now() - started,
+        }, 'debug');
     }
     return data;
 }
@@ -285,10 +320,11 @@ async function webdavGetJson(path, config) {
 }
 
 async function webdavPutJson(path, value, config) {
-    await webdavProxy('put', config, {
-        path,
-        body: JSON.stringify(value, null, 2),
-    });
+    const body = JSON.stringify(value, null, 2);
+    // portable 同步每次都整份重传该 key，体积即是每次上传的流量，
+    // 也用来判断有没有逼近 /api/sync/webdav 的请求体上限。
+    recordSyncDiagnostic('sync.webdav.put', 'WebDAV 写入', { path, chars: body.length }, 'debug');
+    await webdavProxy('put', config, { path, body });
 }
 
 async function webdavDelete(path, config) {
@@ -325,40 +361,64 @@ function createEmptyManifest() {
     };
 }
 
+// 返回 { manifest, missing, invalid }：清单"不存在"和"存在但是空的"后果完全不同，
+// 前者多半是路径/账号指错了地方，合并成一个空清单会让拉取变成静默空转。
 async function readManifest(config) {
-    const manifest = await webdavGetJson(manifestPath(config.basePath), config);
-    if (!manifest || manifest.type !== 'author-sync-manifest-v1') return createEmptyManifest();
+    const raw = await webdavGetJson(manifestPath(config.basePath), config);
+    if (!raw) return { manifest: createEmptyManifest(), missing: true, invalid: false };
+    if (raw.type !== 'author-sync-manifest-v1') {
+        return { manifest: createEmptyManifest(), missing: false, invalid: true };
+    }
     return {
-        ...manifest,
-        entries: manifest.entries && typeof manifest.entries === 'object' ? manifest.entries : {},
+        manifest: {
+            ...raw,
+            entries: raw.entries && typeof raw.entries === 'object' ? raw.entries : {},
+        },
+        missing: false,
+        invalid: false,
     };
 }
 
 async function writeEntriesToWebDav(entries, config) {
     await ensureWebDavReady(config);
-    const manifest = await readManifest(config);
+    const { manifest } = await readManifest(config);
     const now = new Date().toISOString();
 
+    let done = 0;
     for (const [key, { value, timestamp }] of entries) {
         if (!isSyncableKey(key)) continue;
         const updatedAt = new Date(timestamp || Date.now()).toISOString();
 
-        if (value === DELETE_MARKER) {
-            await webdavDelete(keyPath(config.basePath, key), config);
-            manifest.entries[key] = { updatedAt, deleted: true };
-            continue;
+        try {
+            if (value === DELETE_MARKER) {
+                await webdavDelete(keyPath(config.basePath, key), config);
+                manifest.entries[key] = { updatedAt, deleted: true };
+            } else {
+                await webdavPutJson(keyPath(config.basePath, key), { key, value, updatedAt }, config);
+                manifest.entries[key] = { updatedAt, deleted: false };
+            }
+        } catch (err) {
+            // 失败会把全部条目重新入队，不记下断点就无法知道断在哪一条。
+            recordSyncDiagnostic('sync.webdav.write', 'WebDAV 写入条目失败', {
+                key, done, total: entries.length, code: err?.code || '',
+                upstreamStatus: err?.upstreamStatus ?? null,
+            }, 'error');
+            throw err;
         }
-
-        await webdavPutJson(keyPath(config.basePath, key), {
-            key,
-            value,
-            updatedAt,
-        }, config);
-        manifest.entries[key] = { updatedAt, deleted: false };
+        done++;
     }
 
     manifest.updatedAt = now;
-    await webdavPutJson(manifestPath(config.basePath), manifest, config);
+    // 清单最后写：前面每条都成功、唯独清单没落盘的话，别的设备将看不到这批数据。
+    try {
+        await webdavPutJson(manifestPath(config.basePath), manifest, config);
+    } catch (err) {
+        recordSyncDiagnostic('sync.webdav.write', 'WebDAV 清单写入失败', {
+            done, total: entries.length, manifestKeys: Object.keys(manifest.entries || {}).length,
+            code: err?.code || '', upstreamStatus: err?.upstreamStatus ?? null,
+        }, 'error');
+        throw err;
+    }
 }
 
 export async function testWebDavConnection(settingsOverride) {
@@ -393,15 +453,24 @@ export async function flushPortableSync(options = {}) {
     _pendingWrites.clear();
     notifyPortableSyncStatus({ syncing: true, pending: entries.length });
 
+    const flushStarted = Date.now();
     _activeFlushPromise = (async () => {
         const config = await getResolvedWebDavSettings(settings);
         await writeEntriesToWebDav(entries, config);
+        recordSyncDiagnostic('sync.webdav.flush', 'WebDAV 推送完成', {
+            keys: entries.map(([key]) => key), count: entries.length, ms: Date.now() - flushStarted,
+        }, 'info');
         notifyPortableSyncStatus({ syncing: false, pending: 0, lastSync: Date.now() });
     })()
         .catch((err) => {
             for (const [key, data] of entries) {
                 if (!_pendingWrites.has(key)) _pendingWrites.set(key, data);
             }
+            recordSyncDiagnostic('sync.webdav.flush', 'WebDAV 推送失败', {
+                keys: entries.map(([key]) => key), count: entries.length,
+                requeued: _pendingWrites.size, code: err?.code || '',
+                upstreamStatus: err?.upstreamStatus ?? null, ms: Date.now() - flushStarted,
+            }, 'error');
             notifyPortableSyncStatus({ syncing: false, pending: _pendingWrites.size, error: err.message });
             throw err;
         })
@@ -466,7 +535,12 @@ export async function pushAllToWebDav() {
     }
     const config = await getResolvedWebDavSettings(settings);
     const entries = await collectLocalEntries();
+    const started = Date.now();
     await writeEntriesToWebDav(entries, config);
+    recordSyncDiagnostic('sync.webdav.push-all', '全量推送到 WebDAV 完成', {
+        keys: entries.map(([key]) => key), count: entries.length,
+        basePath: config.basePath, ms: Date.now() - started,
+    }, 'info');
     notifyPortableSyncStatus({ syncing: false, pending: 0, lastSync: Date.now() });
     return entries.length;
 }
@@ -502,17 +576,26 @@ async function applyRemoteEntries(entries) {
     return count;
 }
 
+// 返回 { count, manifestMissing, manifestInvalid, manifestKeys, skipped, basePath }。
+// 只返回条数不足以判断成败：清单缺失、清单里列了但远端文件读不到、条目被策略过滤，
+// 三种情况都会得到 count = 0，调用方必须能区分，否则"拉取成功 0 项"会被当成成功。
 export async function pullAllFromWebDav() {
     const settings = loadPortableSyncSettings();
     if (!settings.webdav.enabled) {
         throw localizedError('请先启用并保存 WebDAV 同步', 'Please enable and save WebDAV sync first.', 'Сначала включите и сохраните синхронизацию WebDAV.');
     }
     const config = await getResolvedWebDavSettings(settings);
-    const manifest = await readManifest(config);
+    const started = Date.now();
+    const { manifest, missing, invalid } = await readManifest(config);
+    const manifestKeys = Object.keys(manifest.entries || {});
     const remoteEntries = [];
+    const skipped = [];
 
     for (const [key, meta] of Object.entries(manifest.entries || {})) {
-        if (!isSyncableKey(key)) continue;
+        if (!isSyncableKey(key)) {
+            skipped.push({ key, reason: 'not-syncable' });
+            continue;
+        }
         if (meta?.deleted) {
             remoteEntries.push({ key, deleted: true });
             continue;
@@ -520,12 +603,26 @@ export async function pullAllFromWebDav() {
         const payload = await webdavGetJson(keyPath(config.basePath, key), config);
         if (payload && Object.prototype.hasOwnProperty.call(payload, 'value')) {
             remoteEntries.push({ key, value: payload.value, updatedAt: payload.updatedAt });
+        } else {
+            // 清单列了这个 key，远端文件却读不到：这是真实的数据缺口，不能默默跳过。
+            skipped.push({ key, reason: payload === null ? 'file-missing' : 'no-value-field' });
         }
     }
 
     const count = await applyRemoteEntries(remoteEntries);
+    const result = {
+        count,
+        manifestMissing: missing,
+        manifestInvalid: invalid,
+        manifestKeys: manifestKeys.length,
+        skipped,
+        basePath: config.basePath,
+    };
+    recordSyncDiagnostic('sync.webdav.pull', '从 WebDAV 拉取结束', {
+        ...result, skipped: skipped.slice(0, 20), ms: Date.now() - started,
+    }, count > 0 ? 'info' : 'warn');
     notifyPortableSyncStatus({ syncing: false, pending: _pendingWrites.size, lastSync: Date.now() });
-    return count;
+    return result;
 }
 
 export async function createSyncSnapshot() {

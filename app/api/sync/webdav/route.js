@@ -174,29 +174,73 @@ async function proxyWebDav({ action, path, body, config }, options = {}) {
     return { ok: true, status: response.status };
 }
 
-function safeErrorMessage(result) {
-    if (!result?.status) return 'WebDAV 请求失败';
-    if (result.status === 401 || result.status === 403) return 'WebDAV 认证失败，请检查账号和应用密码';
-    if (result.status === 404) return 'WebDAV 路径不存在';
-    if (result.status === 409) return 'WebDAV 目录不存在或无法创建';
-    return `WebDAV 请求失败 (${result.status})`;
+// 失败分类：桌面端与官网走的是 proxyFetch 的两条不同分支（桌面端带
+// AUTHOR_DESKTOP_CAPABILITY 直连，官网要过 DNS / 公网 IP 校验），所以"桌面能同步、
+// 官网不能"必须能从返回里区分出来。每条失败都带稳定 code 与上游状态，
+// 前端按 code 出三语文案并写入诊断日志，不再只剩一句"WebDAV 请求失败"。
+function upstreamFailure(result) {
+    if (result?.status === 401 || result?.status === 403) {
+        return { code: 'WEBDAV_AUTH_FAILED', error: 'WebDAV 认证失败，请检查账号和应用密码' };
+    }
+    if (result?.status === 404) return { code: 'WEBDAV_PATH_NOT_FOUND', error: 'WebDAV 路径不存在' };
+    if (result?.status === 409) return { code: 'WEBDAV_COLLECTION_CONFLICT', error: 'WebDAV 目录不存在或无法创建' };
+    if (!result?.status) return { code: 'WEBDAV_UPSTREAM_ERROR', error: 'WebDAV 请求失败' };
+    return { code: 'WEBDAV_UPSTREAM_ERROR', error: `WebDAV 请求失败 (${result.status})` };
+}
+
+// 上游连不上（DNS 失败、连接被拒、超时）与"地址或配置写错"是两类问题，
+// 排障方向不同：前者查网络与出站策略，后者查用户填的配置。
+function isUpstreamUnreachable(error) {
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') return true;
+    if (error?.cause) return true;
+    return /fetch failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNRESET|socket hang up/i
+        .test(String(error?.message || ''));
+}
+
+function logWebDav(fields) {
+    console.warn('[webdav]', JSON.stringify(fields));
 }
 
 async function handlePOST(request) {
+    const started = Date.now();
+    let action = '';
     try {
         const payload = await request.json();
+        action = String(payload?.action || '');
         const result = await proxyWebDav(payload || {}, {
             allowPrivateNetwork: isAuthorizedDesktopRequest(request),
         });
         if (!result.ok) {
-            return NextResponse.json({ error: safeErrorMessage(result), status: result.status }, { status: 502 });
+            const failure = upstreamFailure(result);
+            logWebDav({
+                action, phase: 'upstream', code: failure.code, upstreamStatus: result.status,
+                ms: Date.now() - started, detail: redactSensitiveText(result.body || '', 200),
+            });
+            return NextResponse.json(
+                { ...failure, status: result.status, upstreamStatus: result.status },
+                { status: 502 },
+            );
         }
         return NextResponse.json(result);
     } catch (error) {
         if (isOutboundRequestBlocked(error)) {
+            logWebDav({
+                action, phase: 'outbound-blocked', code: error.code, ms: Date.now() - started,
+                detail: redactSensitiveText(error.message || '', 200),
+            });
             return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
         }
-        return NextResponse.json({ error: redactSensitiveText(error?.message || 'WebDAV 请求失败', 200) }, { status: 400 });
+        const unreachable = isUpstreamUnreachable(error);
+        const code = unreachable ? 'WEBDAV_UPSTREAM_UNREACHABLE' : 'WEBDAV_REQUEST_INVALID';
+        logWebDav({
+            action, phase: unreachable ? 'connect' : 'request', code, ms: Date.now() - started,
+            detail: redactSensitiveText(error?.message || '', 200),
+            cause: redactSensitiveText(error?.cause?.code || error?.cause?.message || '', 120),
+        });
+        return NextResponse.json(
+            { error: redactSensitiveText(error?.message || 'WebDAV 请求失败', 200), code },
+            { status: unreachable ? 502 : 400 },
+        );
     }
 }
 

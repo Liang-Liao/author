@@ -126,6 +126,20 @@ export function localizeApiError(payload, text) {
         case 'RATE_LIMITED':
         case 'SERVER_BUSY':
             return text('当前请求较多，请稍后重试。', 'Too many active requests. Please retry shortly.', 'Слишком много запросов. Повторите попытку чуть позже.');
+        // —— WebDAV（坚果云等）——
+        case 'WEBDAV_AUTH_FAILED':
+            return text('WebDAV 认证失败，请检查账号和应用密码。', 'WebDAV authentication failed. Check the account and app password.', 'Ошибка аутентификации WebDAV. Проверьте учётную запись и пароль приложения.');
+        case 'WEBDAV_PATH_NOT_FOUND':
+            return text('WebDAV 路径不存在，请检查同步目录。', 'The WebDAV path does not exist. Check the sync folder.', 'Путь WebDAV не существует. Проверьте папку синхронизации.');
+        case 'WEBDAV_COLLECTION_CONFLICT':
+            return text('WebDAV 目录不存在或无法创建，请检查同步目录权限。', 'The WebDAV folder is missing or could not be created. Check the sync folder permissions.', 'Папка WebDAV отсутствует или не может быть создана. Проверьте права доступа.');
+        case 'WEBDAV_UPSTREAM_UNREACHABLE':
+            return text('连接不上 WebDAV 服务器，请检查网络和 WebDAV 地址。', 'Could not reach the WebDAV server. Check your network and the WebDAV address.', 'Не удалось подключиться к серверу WebDAV. Проверьте сеть и адрес WebDAV.');
+        case 'WEBDAV_UPSTREAM_ERROR':
+            return text(`WebDAV 服务器返回错误${payload.upstreamStatus ? ` (${payload.upstreamStatus})` : ''}，请稍后重试。`, `The WebDAV server returned an error${payload.upstreamStatus ? ` (${payload.upstreamStatus})` : ''}. Please retry later.`, `Сервер WebDAV вернул ошибку${payload.upstreamStatus ? ` (${payload.upstreamStatus})` : ''}. Повторите попытку позже.`);
+        case 'WEBDAV_REQUEST_INVALID':
+            return text('WebDAV 请求无效，请检查地址和同步目录填写是否正确。', 'The WebDAV request was invalid. Check the address and sync folder.', 'Некорректный запрос WebDAV. Проверьте адрес и папку синхронизации.');
+
         case 'REQUEST_TIMEOUT':
             return text('上传或请求读取超时，请重试。', 'Upload or request reading timed out. Please retry.', 'Время загрузки или чтения запроса истекло. Повторите попытку.');
         case 'REQUEST_CANCELLED':

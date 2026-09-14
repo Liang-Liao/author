@@ -79,6 +79,14 @@ async function writeLocal(key, value, context) {
     assertOperation(context);
 }
 
+// 诊断：推送失败要能还原"多大的批、什么状态码"，否则只剩一句"部分内容尚未同步"。
+// 诊断本身绝不能让同步失败，因此动态载入并吞掉自身错误。
+function recordSyncDiagnostic(event, message, metadata, level = 'info') {
+    import('./diagnostics')
+        .then(({ recordDiagnosticEvent }) => recordDiagnosticEvent(event, message, metadata, level))
+        .catch(() => {});
+}
+
 let _syncStatusCallback = null;
 export function onCustomSyncStatusChange(cb) { _syncStatusCallback = cb; }
 function notifyStatus(status) {
@@ -264,7 +272,18 @@ async function flushPendingSync(options, context) {
                 const batch = items.slice(i, i + PUSH_BATCH);
                 const res = await authorizedFetch('/api/free/sync/push', { method: 'POST', body: { items: batch }, authContext: context.auth, signal: context.signal });
                 assertOperation(context);
-                if (!res.ok) { unconfirmed = true; break; }
+                if (!res.ok) {
+                    // 批次只按条数切分，不按字节；后端有请求体上限时，超限的批会一直
+                    // 重试一直失败。记下条数与序列化长度，才能把 413 和别的失败分开。
+                    recordSyncDiagnostic('sync.cloud.push', '云端推送批次失败', {
+                        key, kind: batch[0]?.kind || '', status: res.status,
+                        batchItems: batch.length, batchIndex: i / PUSH_BATCH,
+                        batchChars: JSON.stringify({ items: batch }).length,
+                        totalItems: items.length,
+                    }, 'error');
+                    unconfirmed = true;
+                    break;
+                }
                 const data = await res.json().catch(() => null);
                 assertOperation(context);
                 const results = matchPushResults(batch, data);
@@ -277,6 +296,13 @@ async function flushPendingSync(options, context) {
                     } else {
                         unconfirmed = true;
                         if (result?.reason === 'stale') sawStale = true;
+                        // 条目级未确认：服务器收下了请求却没确认这一条（stale / 缺应答 /
+                        // 单条超限），与整批失败是两回事，分开记录才好定位。
+                        recordSyncDiagnostic('sync.cloud.push-item', '云端未确认该条目', {
+                            key, kind: item.kind, itemId: item.itemId,
+                            reason: result?.reason || (result ? 'not-accepted' : 'no-result'),
+                            itemChars: JSON.stringify(item).length,
+                        }, 'warn');
                     }
                 }
                 saveState(); // A later batch failure must not erase earlier confirmations.
@@ -378,7 +404,18 @@ async function pullCloudItems(context) {
             // remote items into the current local array, not that older read.
             if (applicable.length !== items.length) localValue = await readLocal(key, context);
             const { changed, value } = mergeItemsIntoLocal(meta.kind, localValue, applicable, _state.keys[key] || {});
-            if (changed) { await writeLocal(key, value, context); merged++; }
+            if (changed) {
+                // works_index 是"云端整份覆盖本地"，刚从 WebDAV 拉回来的作品列表同样会被盖掉。
+                // 这类覆盖必须留痕，否则对用户就表现为"拉取成功但数据没变"。
+                recordSyncDiagnostic('sync.cloud.merge', '云端合并改写了本地数据', {
+                    key, kind: meta.kind, fullOverwrite: meta.kind === 'works_index',
+                    appliedItems: applicable.length,
+                    localItems: Array.isArray(localValue) ? localValue.length : null,
+                    mergedItems: Array.isArray(value) ? value.length : null,
+                }, meta.kind === 'works_index' ? 'warn' : 'debug');
+                await writeLocal(key, value, context);
+                merged++;
+            }
             commitPulledState(key, applicable); // Unconfirmed items keep their previous common baseline.
         }
         const previousCursor = _state.cursor;
@@ -388,6 +425,9 @@ async function pullCloudItems(context) {
         return merged;
     } catch (err) {
         // 自动拉取容错：不中断流程，但错误通过状态回调暴露（不再静默假成功）
+        recordSyncDiagnostic('sync.cloud.pull', '云端自动拉取失败', {
+            manual: false, cursor: _state?.cursor ?? null, message: String(err?.message || ''),
+        }, 'error');
         if (operationIsCurrent(context)) notifyStatus({ syncing: false, error: err?.message || '云端拉取失败' });
         return 0;
     }
@@ -443,6 +483,9 @@ async function forcePullCloudItems(context) {
     } catch (err) {
         // 手动触发失败必须让用户知道：报状态并把错误抛给调用方（Sidebar 会提示“拉取失败”），
         // 绝不能静默返回 0 假装成功、还错误推进游标。
+        recordSyncDiagnostic('sync.cloud.pull', '云端手动拉取失败', {
+            manual: true, cursor: _state?.cursor ?? null, message: String(err?.message || ''),
+        }, 'error');
         if (operationIsCurrent(context)) notifyStatus({ syncing: false, error: err?.message || '从云端拉取失败' });
         throw err;
     }
