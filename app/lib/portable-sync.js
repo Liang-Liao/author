@@ -555,6 +555,7 @@ async function applyRemoteEntries(entries) {
         window._isForcePullingBypass = true;
     }
 
+    const restoredKeys = [];
     try {
         for (const entry of entries) {
             if (!entry?.key || !isSyncableKey(entry.key)) continue;
@@ -563,6 +564,7 @@ async function applyRemoteEntries(entries) {
             } else {
                 await persistSet(entry.key, entry.value);
             }
+            restoredKeys.push(entry.key);
             count++;
         }
     } finally {
@@ -571,6 +573,16 @@ async function applyRemoteEntries(entries) {
             window._isAppForcePulling = false;
             window._isForcePullingBypass = false;
         }
+    }
+
+    // 恢复进来的条目带的是原设备的 updatedAt（比云端旧），照原样推会被云端判 stale
+    // 而永远推不上去，接着还会被云端版本盖回来——用户看到的就是"拉取成功但没生效"。
+    // 恢复是用户明确的"以这份为准"，所以让它们以当前时间作为版本推上云端。
+    if (restoredKeys.length > 0) {
+        try {
+            const { markKeysRestored } = await import('./custom-server-sync');
+            markKeysRestored(restoredKeys);
+        } catch {}
     }
 
     return count;

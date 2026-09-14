@@ -23,6 +23,7 @@ const IDLE_TIMEOUT = 5 * 60 * 1000;  // 5 分钟无变化后停止自动同步
 const PUSH_BATCH = 100;              // 单次 push 的条目数（配合后端 ~1MB 请求体上限）
 const PULL_LIMIT = 200;
 const SYNC_STATE_PREFIX = 'author-cloud-sync-state-v2:'; // 本地增量状态，绝不上云
+const RESTORED_KEYS_STORAGE = 'author-sync-restored-keys-v1'; // 同上，只留在本地
 
 // ==================== 状态 & 队列 ====================
 
@@ -100,12 +101,42 @@ export function bindLocalIO(localGet, localSet) { _localGet = localGet; _localSe
 // keys stores confirmed baselines; pending stores unconfirmed upload attempts.
 // Both contain per-item { hash } | { deleted:true }, never document contents.
 
+// ==================== 恢复标记 ====================
+// 从 WebDAV / 备份恢复回来的条目带的是原设备的 updatedAt，比云端旧；按原值推送会被
+// 服务器判 stale，永远推不上去。恢复是用户明确的"以这份为准"，所以标记这些 key，
+// 下一次推送用当前时间作为版本。恢复后页面会刷新，标记必须活过刷新 → 存 localStorage。
+export function markKeysRestored(keys) {
+    if (typeof window === 'undefined') return;
+    try {
+        const current = readRestoredKeys();
+        for (const key of keys) if (isSyncableKey(key)) current[key] = Date.now();
+        localStorage.setItem(RESTORED_KEYS_STORAGE, JSON.stringify(current));
+    } catch {}
+}
+
+function readRestoredKeys() {
+    if (typeof window === 'undefined') return {};
+    try { return JSON.parse(localStorage.getItem(RESTORED_KEYS_STORAGE) || '{}') || {}; }
+    catch { return {}; }
+}
+
+// 整个 key 的条目都确认后才清除；中途失败要能按同样语义重试。
+function clearRestoredKey(key) {
+    if (typeof window === 'undefined') return;
+    try {
+        const current = readRestoredKeys();
+        if (!Object.hasOwn(current, key)) return;
+        delete current[key];
+        localStorage.setItem(RESTORED_KEYS_STORAGE, JSON.stringify(current));
+    } catch {}
+}
+
 function stateStorageKey(identity) {
     return `${SYNC_STATE_PREFIX}${encodeURIComponent(JSON.stringify([identity.serverUrl, identity.product, identity.userId ?? identity.accountId]))}`;
 }
 
 function emptyState(auth) {
-    return { cursor: 0, keys: {}, pending: {}, serverUrl: auth.serverUrl, product: auth.product, accountId: auth.userId };
+    return { cursor: 0, keys: {}, pending: {}, stale: {}, serverUrl: auth.serverUrl, product: auth.product, accountId: auth.userId };
 }
 
 function loadState(auth) {
@@ -113,7 +144,7 @@ function loadState(auth) {
     try {
         const s = JSON.parse(localStorage.getItem(stateStorageKey(auth)) || 'null');
         if (s?.serverUrl === auth.serverUrl && s?.product === auth.product && s?.accountId === auth.userId) {
-            return { ...emptyState(auth), cursor: Number(s.cursor) || 0, keys: s.keys || {}, pending: s.pending || {} };
+            return { ...emptyState(auth), cursor: Number(s.cursor) || 0, keys: s.keys || {}, pending: s.pending || {}, stale: s.stale || {} };
         }
     } catch {}
     return emptyState(auth);
@@ -254,6 +285,8 @@ async function flushPendingSync(options, context) {
     const keys = Array.from(_pendingKeys);
     _pendingKeys.clear();
     const now = new Date().toISOString();
+    const restoredKeys = readRestoredKeys();
+    _state.stale ||= {}; // 旧版本存下来的状态里没有这张表
     let sawStale = false;
     let unconfirmed = false;
 
@@ -261,7 +294,14 @@ async function flushPendingSync(options, context) {
         for (const key of keys) {
             if (!isSyncableKey(key)) continue;
             const value = await readLocal(key, context);
-            const { items, nextItemState } = diffKeyToItems(key, value, now, _state.keys[key] || {}, _state.pending[key] || {});
+            const { items, nextItemState } = diffKeyToItems(
+                key, value, now, _state.keys[key] || {}, _state.pending[key] || {},
+                {
+                    freshClientUpdatedAt: Object.hasOwn(restoredKeys, key)
+                        ? true
+                        : new Set(Object.keys(_state.stale?.[key] || {})),
+                },
+            );
             if (items.length === 0) { _state.keys[key] = nextItemState; continue; }
 
             for (const item of items) {
@@ -293,9 +333,18 @@ async function flushPendingSync(options, context) {
                     if (result?.accepted === true) {
                         _state.keys[key] = { ..._state.keys[key], [item.itemId]: pushedItemState(item) };
                         delete _state.pending[key][item.itemId];
+                        // 这一条已经过去了，撤掉它的 stale 标记，别让后续推送一直沿用
+                        // "强制当前时间"，那会掩盖真正的多设备冲突。
+                        if (_state.stale[key]) delete _state.stale[key][item.itemId];
                     } else {
                         unconfirmed = true;
-                        if (result?.reason === 'stale') sawStale = true;
+                        if (result?.reason === 'stale') {
+                            sawStale = true;
+                            // stale 是服务器的终局结论（云端那份更新），重推同样内容
+                            // 永远不会成功。记下来，让紧接着的 pull 收下云端版本并解除
+                            // pending，否则推不上去也拉不下来，两边永久分叉。
+                            _state.stale[key] = { ...(_state.stale[key] || {}), [item.itemId]: true };
+                        }
                         // 条目级未确认：服务器收下了请求却没确认这一条（stale / 缺应答 /
                         // 单条超限），与整批失败是两回事，分开记录才好定位。
                         recordSyncDiagnostic('sync.cloud.push-item', '云端未确认该条目', {
@@ -311,6 +360,8 @@ async function flushPendingSync(options, context) {
                 _pendingKeys.add(key);
             } else {
                 delete _state.pending[key];
+                delete _state.stale[key];
+                clearRestoredKey(key); // 该 key 全部确认，恢复语义到此完成
             }
         }
         saveState();

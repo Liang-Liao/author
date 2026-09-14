@@ -47,7 +47,14 @@ export function itemToKey(it) {
 // 拆分：一个 key 的当前 value → 待推条目（只含变化/新增/删除）
 // prevItemState: 上次同步该 key 的 { itemId: { hash } | { deleted:true } }
 // 返回 { items, nextItemState }（nextItemState 供"推成功后"保存）
-export function diffKeyToItems(key, value, now, prevItemState = {}, pendingItemState = {}) {
+// options.freshClientUpdatedAt：true 表示整个 key、Set 表示其中指定条目，强制用 now
+// 作为版本，不用条目自带的 updatedAt。两个用途：
+//   1. 从备份 / WebDAV 恢复——条目带的是原设备的旧时间，按原值推会被判 stale；
+//      恢复是用户明确的"以这份为准"，它就该是最新版。
+//   2. 被判 stale 后的重推——重推的语义就是"我这份才是要保留的"。不换版本戳的话，
+//      服务器每次都会给出同样的 stale 结论，重试永远出不去（章节因为一直用 now
+//      所以没这个问题，只有设定和记忆组会卡死）。
+export function diffKeyToItems(key, value, now, prevItemState = {}, pendingItemState = {}, options = {}) {
     const meta = parseKey(key);
     if (!meta) return { items: [], nextItemState: {} };
     const { kind, workId } = meta;
@@ -78,8 +85,11 @@ export function diffKeyToItems(key, value, now, prevItemState = {}, pendingItemS
             next[itemId] = { hash }; // 未变，不推
             continue;
         }
-        // 变了（或新增）：章节用检测时间，设定/记忆组用自带 updatedAt
-        const clientUpdatedAt = (kind === 'chapter')
+        // 变了（或新增）：章节用检测时间，设定/记忆组用自带 updatedAt；
+        // 恢复场景下一律用 now，否则外来的旧时间戳会被云端判为过期。
+        const fresh = options.freshClientUpdatedAt;
+        const useNow = kind === 'chapter' || fresh === true || fresh?.has?.(itemId) === true;
+        const clientUpdatedAt = useNow
             ? now
             : (item.updatedAt ? new Date(item.updatedAt).toISOString() : now);
         items.push({ workId, kind, itemId, value: item, contentHash: hash, clientUpdatedAt });
