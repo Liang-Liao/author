@@ -24,6 +24,47 @@ export function fingerprint(value) {
     return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
 }
 
+// UTF-8 字节数：后端按字节限制请求体，中文一个字占 3 字节，按字符数估会低估约 3 倍。
+export function utf8ByteLength(str) {
+    let bytes = 0;
+    for (let i = 0; i < str.length; i++) {
+        const code = str.charCodeAt(i);
+        if (code < 0x80) bytes += 1;
+        else if (code < 0x800) bytes += 2;
+        else if (code >= 0xd800 && code <= 0xdbff && (str.charCodeAt(i + 1) & 0xfc00) === 0xdc00) { bytes += 4; i++; }
+        else bytes += 3;
+    }
+    return bytes;
+}
+
+const PUSH_BODY_OVERHEAD = utf8ByteLength(JSON.stringify({ items: [] }));
+
+// 推送切批：同时限制条数和请求体字节数（请求体即 JSON.stringify({ items: batch })）。
+// 只按条数切的话，章节一长整批就超过后端 ~1MB 上限，重试时还是同一批，永远推不上去。
+// 单条就放不进一个请求的条目放进 oversized，不发送，由调用方明确报错。
+export function splitPushBatches(items, { maxItems, maxBytes }) {
+    const batches = [];
+    const oversized = [];
+    let batch = [];
+    let bytes = PUSH_BODY_OVERHEAD;
+    for (const item of items) {
+        const itemBytes = utf8ByteLength(JSON.stringify(item));
+        if (PUSH_BODY_OVERHEAD + itemBytes > maxBytes) {
+            oversized.push({ item, bytes: PUSH_BODY_OVERHEAD + itemBytes });
+            continue;
+        }
+        if (batch.length > 0 && (batch.length >= maxItems || bytes + 1 + itemBytes > maxBytes)) {
+            batches.push(batch);
+            batch = [];
+            bytes = PUSH_BODY_OVERHEAD;
+        }
+        bytes += (batch.length > 0 ? 1 : 0) + itemBytes; // 1 = 条目之间的逗号
+        batch.push(item);
+    }
+    if (batch.length > 0) batches.push(batch);
+    return { batches, oversized };
+}
+
 // 存储键 → { kind, workId }
 export function parseKey(key) {
     if (key === 'author-works-index') return { kind: 'works_index', workId: '_index' };

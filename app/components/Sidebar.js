@@ -146,6 +146,8 @@ function SyncMenuPortal({ anchorRef, t, text, showToast, cloudinarySyncStatus, s
                                 await useAppStore.getState().flushPendingLocalSave();
                                 const { syncToCloud } = await import('../lib/persistence');
                                 await syncToCloud();
+                                // 手机上侧栏只有图标、看不到状态文字，没有这句提示就像点了没反应
+                                showToast(text('已同步到云端', 'Synced to the cloud', 'Синхронизировано с облаком'), 'success');
                             } catch (err) {
                                 showToast(text(`同步失败: ${err.message}`, `Sync failed: ${err.message}`, `Синхронизация не удалась: ${err.message}`), 'error');
                             }

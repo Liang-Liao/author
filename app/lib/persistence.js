@@ -481,6 +481,9 @@ export async function initPersistence() {
         _customAuthModule.initCustomAuth();
         custom.setupCustomBeforeUnloadSync();
     }
+
+    // WebDAV：接着推上次页面被关掉或回收前没推完的（未启用 WebDAV 时直接返回）
+    import('./portable-sync').then(sync => sync.resumePortableSync()).catch(() => {});
 }
 
 /**

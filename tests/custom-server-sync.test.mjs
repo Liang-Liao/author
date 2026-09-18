@@ -460,3 +460,153 @@ test('force pull clears a local key when the remote batch contains only a tombst
     assert.deepEqual(f.values.get(KEY), []);
     assert.deepEqual(f.state().keys[KEY].c1, { deleted: true });
 });
+
+// ==================== 长篇与手机端 ====================
+// 用户反馈：手机上用官网"只能拉取，上传不上去"。两个根因：
+//   1. 推送只按条数切批，长篇整批超过后端 ~1 MiB 请求体上限，每次重试都是同一批；
+//   2. 待推队列只在内存里，手机浏览器切到后台就被冻结或回收，5 分钟定时器等不到。
+
+const BACKEND_BODY_LIMIT = 1024 * 1024;
+const tooLarge = () => ({ ok: false, status: 413, json: async () => ({ ok: false }) });
+const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(resolve => setImmediate(resolve)); };
+const pushRequests = f => f.requests.filter(request => request.path.endsWith('/push'));
+
+test('长篇按字节切批上传，每个请求都在后端上限内，全部确认', async t => {
+    // 60 章 × 每章 6000 字：旧逻辑一批 60 章约 1.1 MB，必然 413。
+    const local = Array.from({ length: 60 }, (_, index) => chapter(`c${index}`, `第${index}章`.padEnd(6000, '文')));
+    const f = await fixture(t, { local });
+    f.env.push = async items => Buffer.byteLength(JSON.stringify({ items })) > BACKEND_BODY_LIMIT
+        ? tooLarge()
+        : response({ ok: true, results: items.map(item => acknowledgement(item)) });
+    f.sync.customEnqueue(KEY);
+    await f.sync.flushSync({ throwOnError: true });
+    assert.ok(pushRequests(f).length > 1);
+    for (const request of pushRequests(f)) {
+        assert.ok(Buffer.byteLength(JSON.stringify(request.options.body)) <= 900 * 1000);
+    }
+    assert.equal(Object.keys(f.state().keys[KEY]).length, 60);
+    assert.equal(f.state().pending[KEY], undefined);
+});
+
+test('单章超过上限：不发送、明确说是哪一章，其余章节照常上传，本地一字不动', async t => {
+    const huge = { ...chapter('huge', '巨'.repeat(400_000)), title: '整本导入' };
+    const local = [chapter('a', 'short a'), huge, chapter('b', 'short b')];
+    const f = await fixture(t, { local });
+    f.env.push = async items => Buffer.byteLength(JSON.stringify({ items })) > BACKEND_BODY_LIMIT
+        ? tooLarge()
+        : response({ ok: true, results: items.map(item => acknowledgement(item)) });
+    f.sync.customEnqueue(KEY);
+    await assert.rejects(f.sync.flushSync({ throwOnError: true }), /整本导入.*太长/);
+    const sent = pushRequests(f).flatMap(request => request.options.body.items.map(item => item.itemId));
+    assert.deepEqual(sent.sort(), ['a', 'b']);
+    assert.deepEqual(Object.keys(f.state().keys[KEY]).sort(), ['a', 'b']);
+    assert.ok(f.state().pending[KEY].huge);
+    assert.deepEqual(f.values.get(KEY), local);
+    assert.ok(f.statuses.at(-1).pending > 0);
+});
+
+test('改了还没来得及推、页面就被关掉：下次打开接着推', async t => {
+    const base = chapter('c1', 'base');
+    const edit = chapter('c1', 'written on the phone');
+    const f = await fixture(t, { baseline: [base], local: [edit] });
+    f.sync.customEnqueue(KEY); // 5 分钟定时器还没到，页面就被系统回收
+    assert.equal(f.state().dirty[KEY], true);
+    assert.equal(pushRequests(f).length, 0);
+
+    const reopened = await fixture(t, { storage: f.storage, values: f.values });
+    await reopened.sync.flushSync({ throwOnError: true });
+    const [upload] = pushRequests(reopened);
+    assert.deepEqual(upload.options.body.items.map(item => item.value), [edit]);
+    assert.equal(reopened.state().keys[KEY].c1.hash, fingerprint(edit));
+    assert.equal(reopened.state().dirty[KEY], undefined);
+});
+
+test('推送途中又改了同一个 key：推完不撤标记，下一轮把新内容推上去', async t => {
+    const first = chapter('c1', 'first');
+    const second = chapter('c1', 'second');
+    const f = await fixture(t, { local: [first] });
+    f.env.push = async items => {
+        f.values.set(KEY, [second]);
+        f.sync.customEnqueue(KEY);
+        return response({ ok: true, results: items.map(item => acknowledgement(item)) });
+    };
+    f.sync.customEnqueue(KEY);
+    await f.sync.flushSync({ throwOnError: true });
+    assert.equal(f.state().dirty[KEY], true);
+
+    f.env.push = async items => response({ ok: true, results: items.map(item => acknowledgement(item)) });
+    const reopened = await fixture(t, { storage: f.storage, values: f.values });
+    await reopened.sync.flushSync({ throwOnError: true });
+    assert.deepEqual(pushRequests(reopened)[0].options.body.items.map(item => item.value), [second]);
+    assert.equal(reopened.state().dirty[KEY], undefined);
+});
+
+test('推送失败时标记保留，重开页面还会重试', async t => {
+    const f = await fixture(t, { local: [chapter('c1', 'offline edit')] });
+    f.env.push = async () => { throw new Error('Network unavailable'); };
+    f.sync.customEnqueue(KEY);
+    await assert.rejects(f.sync.flushSync({ throwOnError: true }), /Network unavailable/);
+    assert.equal(f.state().dirty[KEY], true);
+});
+
+test('从云端强制拉取会放弃本地待推标记，不把刚覆盖的内容再推回去', async t => {
+    const f = await fixture(t, { local: [chapter('c1', 'local')] });
+    f.sync.customEnqueue(KEY);
+    f.env.pull = async () => response({ ok: true, items: [cloudItem(chapter('c1', 'cloud'))], nextSince: 2 });
+    await f.sync.forcePullFromCloud();
+    assert.deepEqual(f.state().dirty, {});
+});
+
+function installLifecycle(t) {
+    const listeners = new Map();
+    const target = () => ({ addEventListener: (name, callback) => listeners.set(name, callback) });
+    const originals = ['window', 'document'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]);
+    t.after(() => {
+        for (const [key, descriptor] of originals) {
+            if (descriptor) Object.defineProperty(globalThis, key, descriptor);
+            else delete globalThis[key];
+        }
+    });
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: target() });
+    Object.defineProperty(globalThis, 'document', { configurable: true, value: { ...target(), hidden: false } });
+    return {
+        hide: () => { globalThis.document.hidden = true; listeners.get('visibilitychange')(); },
+        show: () => { globalThis.document.hidden = false; listeners.get('visibilitychange')(); },
+    };
+}
+
+test('打开页面时先拉取，再把上次没推完的推上去', async t => {
+    const base = chapter('c1', 'base');
+    const edit = chapter('c1', 'left over from last session');
+    const f = await fixture(t, { baseline: [base], local: [edit] });
+    f.sync.customEnqueue(KEY);
+
+    const reopened = await fixture(t, { storage: f.storage, values: f.values });
+    installLifecycle(t);
+    reopened.sync.setupCustomBeforeUnloadSync();
+    await settle();
+    const paths = reopened.requests.map(request => request.path.split('/').at(-1));
+    assert.deepEqual(paths, ['pull', 'push']);
+    assert.deepEqual(pushRequests(reopened)[0].options.body.items.map(item => item.value), [edit]);
+    assert.equal(reopened.state().dirty[KEY], undefined);
+});
+
+test('切到后台（锁屏、切应用）立即推送，不等 5 分钟定时器', async t => {
+    const f = await fixture(t, { local: [] });
+    const page = installLifecycle(t);
+    f.sync.setupCustomBeforeUnloadSync();
+    await settle();
+    f.requests.length = 0;
+
+    const edit = chapter('c1', 'typed on the phone');
+    f.values.set(KEY, [edit]);
+    f.sync.customEnqueue(KEY);
+    page.hide();
+    await settle();
+    assert.deepEqual(pushRequests(f).map(request => request.options.body.items[0].value), [edit]);
+
+    page.show(); // 切回前台只拉取，没有待推内容就不推
+    await settle();
+    assert.equal(pushRequests(f).length, 1);
+    assert.ok(f.requests.at(-1).path.endsWith('/pull'));
+});

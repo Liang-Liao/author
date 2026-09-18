@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { diffKeyToItems, fingerprint, mergeItemsIntoLocal } from '../app/lib/custom-sync-core.js';
+import { diffKeyToItems, fingerprint, mergeItemsIntoLocal, splitPushBatches, utf8ByteLength } from '../app/lib/custom-sync-core.js';
 
 const row = (id, content) => ({ id, content });
 const remote = (value, serverSeq) => ({ itemId: value.id, value, serverSeq });
@@ -117,4 +117,50 @@ test('stale 重推必须换新版本戳，否则重试永远得到同样结论',
 test('章节不受影响，始终用当前时间', () => {
     const result = diffKeyToItems('author-chapters-work-test', [node('a')], NOW);
     assert.deepEqual(stamps(result), { a: NOW });
+});
+
+// ==================== 推送切批 ====================
+// 后端整个请求体上限约 1 MB。只按条数切（100 条一批）的话，每章几千字的长篇整批超限，
+// 重试时还是同一批、同样大小，用户永久停在"部分内容未同步"。以下用例锁住按字节切批。
+
+const bodyBytes = batch => Buffer.byteLength(JSON.stringify({ items: batch }), 'utf8');
+const pushItem = (id, text) => ({ workId: 'w', kind: 'chapter', itemId: id, value: { id, content: text }, contentHash: 'h', clientUpdatedAt: NOW });
+
+test('UTF-8 字节数与实际发出的请求体一致（中文 3 字节、emoji 4 字节）', () => {
+    for (const text of ['plain ascii', '中文正文', 'é ü', '表情😀结尾', JSON.stringify('孤立代理\ud800')]) {
+        assert.equal(utf8ByteLength(text), Buffer.byteLength(text, 'utf8'), text);
+    }
+});
+
+test('长章节按请求体字节切批，每批都不超上限，顺序与条目一个不少', () => {
+    const items = Array.from({ length: 30 }, (_, index) => pushItem(`c${index}`, '长'.repeat(20_000 + index * 997)));
+    const { batches, oversized } = splitPushBatches(items, { maxItems: 100, maxBytes: 200_000 });
+    assert.deepEqual(oversized, []);
+    assert.ok(batches.length > 1);
+    for (const batch of batches) assert.ok(bodyBytes(batch) <= 200_000, `batch of ${bodyBytes(batch)} bytes`);
+    assert.deepEqual(batches.flat(), items);
+});
+
+test('条数上限仍然生效', () => {
+    const items = Array.from({ length: 250 }, (_, index) => pushItem(`c${index}`, 'short'));
+    const { batches } = splitPushBatches(items, { maxItems: 100, maxBytes: 900_000 });
+    assert.deepEqual(batches.map(batch => batch.length), [100, 100, 50]);
+});
+
+test('刚好压线的批不超限，多一个字节就换批', () => {
+    const one = pushItem('a', 'x');
+    const exact = bodyBytes([one, one]);
+    assert.equal(splitPushBatches([one, one], { maxItems: 100, maxBytes: exact }).batches.length, 1);
+    assert.equal(splitPushBatches([one, one], { maxItems: 100, maxBytes: exact - 1 }).batches.length, 2);
+});
+
+test('单条就放不进一个请求的条目单独隔离，不连累前后条目', () => {
+    const small = pushItem('small', '短');
+    const huge = pushItem('huge', '巨'.repeat(100_000));
+    const tail = pushItem('tail', '尾');
+    const { batches, oversized } = splitPushBatches([small, huge, tail], { maxItems: 100, maxBytes: 200_000 });
+    assert.deepEqual(batches, [[small, tail]]);
+    assert.equal(oversized.length, 1);
+    assert.equal(oversized[0].item, huge);
+    assert.equal(oversized[0].bytes, bodyBytes([huge]));
 });

@@ -4,12 +4,16 @@ import { isSyncableKey } from './sync-key-policy';
 import { localizedError, tt } from './runtime-i18n';
 import { localizeApiError } from './api-error-i18n';
 import { apiPath } from './api-base';
+import { waitForLocalSaves } from './local-save-status';
+import { utf8ByteLength } from './custom-sync-core';
 
 const SETTINGS_KEY = 'author-sync-settings';
 const SECRET_PREFIX = 'author-sync-secret-';
+const PENDING_KEYS_STORAGE = 'author-sync-webdav-pending-v1'; // 只记 key 名，内容推送时现读
 const DELETE_MARKER = '_AUTHOR_DELETE_';
 const SYNC_INTERVAL = 5 * 60 * 1000;
 const IDLE_TIMEOUT = 5 * 60 * 1000;
+const LEAVE_SAVE_WAIT = 2000; // 离开页面时等编辑器落盘的最长时间
 const MANIFEST_FILE = 'manifest.json';
 const KEY_DIR = 'keys';
 
@@ -57,11 +61,15 @@ function recordSyncDiagnostic(event, message, metadata, level = 'info') {
 }
 
 const _pendingWrites = new Map();
+const _inFlightWrites = new Map(); // 正在推的条目：推完之前页面被回收，下次还得接着推
 const _statusListeners = new Set();
 let _syncTimer = null;
 let _idleTimer = null;
 let _isSyncing = false;
 let _activeFlushPromise = null;
+let _leaveFlushInstalled = false;
+let _resumeStarted = false;
+let _persistedPendingSignature = null;
 
 function cloneDefaultSettings() {
     return JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
@@ -217,6 +225,86 @@ function resetIdleTimer() {
     }, IDLE_TIMEOUT);
 }
 
+// ==================== 待推队列落盘 ====================
+// 队列只在内存里的话，手机浏览器切到后台被回收后就丢了，那台设备上写的内容再也不会
+// 自动推送。内容可能很大，只落 key 名和是否删除；下次打开页面按名字现读本地内容接着推。
+
+const _resumingKeys = new Map(); // 启动时从落盘记录读出、还没处理完的 key → { deleted }
+
+function persistPendingKeys() {
+    if (typeof window === 'undefined') return;
+    const record = {};
+    for (const [key, meta] of _resumingKeys) record[key] = meta;
+    for (const source of [_inFlightWrites, _pendingWrites]) {
+        for (const [key, { value }] of source) record[key] = { deleted: value === DELETE_MARKER };
+    }
+    const signature = JSON.stringify(record);
+    if (signature === _persistedPendingSignature) return; // 打字时每次落盘都会入队，内容没变就不重写
+    try {
+        if (Object.keys(record).length === 0) localStorage.removeItem(PENDING_KEYS_STORAGE);
+        else localStorage.setItem(PENDING_KEYS_STORAGE, signature);
+        _persistedPendingSignature = signature;
+    } catch {}
+}
+
+// 离开页面前的推送。手机浏览器切到后台后随时冻结或回收页面，iOS Safari 也不触发
+// beforeunload；只靠 5 分钟定时器，手机上写的内容几乎推不出去。
+function installLeaveFlush() {
+    if (_leaveFlushInstalled || typeof window === 'undefined' || typeof document === 'undefined') return;
+    _leaveFlushInstalled = true;
+    const flushBeforeLeaving = () => {
+        // 编辑器在同一个事件里把最后几个字落盘，等它落完再推；等不到也照推已入队的。
+        waitForLocalSaves({ timeoutMs: LEAVE_SAVE_WAIT }).catch(() => {}).then(() => {
+            if (_pendingWrites.size > 0) flushPortableSync().catch(() => {});
+        });
+    };
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') flushBeforeLeaving();
+    });
+    window.addEventListener('pagehide', flushBeforeLeaving);
+}
+
+// 页面启动时调用：把上次没推完的接着推。
+export async function resumePortableSync() {
+    if (typeof window === 'undefined' || _resumeStarted) return 0;
+    _resumeStarted = true;
+    if (!loadPortableSyncSettings().webdav.enabled) return 0;
+    installLeaveFlush();
+
+    let record = null;
+    try { record = JSON.parse(localStorage.getItem(PENDING_KEYS_STORAGE) || 'null'); } catch {}
+    if (!record || typeof record !== 'object' || Array.isArray(record)) return 0;
+    for (const [key, meta] of Object.entries(record)) {
+        if (isSyncableKey(key)) _resumingKeys.set(key, { deleted: meta?.deleted === true });
+    }
+
+    const { persistGet } = await import('./persistence');
+    let resumed = 0;
+    for (const [key, meta] of Array.from(_resumingKeys)) {
+        // 这期间已经重新入队的，队列里的值更新
+        if (!_pendingWrites.has(key) && !_inFlightWrites.has(key)) {
+            let value;
+            try { value = await persistGet(key); } catch { continue; } // 读不到就留着记录，下次再试
+            if (value !== undefined && value !== null) {
+                _pendingWrites.set(key, { value, timestamp: Date.now() });
+                resumed++;
+            } else if (meta.deleted) {
+                _pendingWrites.set(key, { value: DELETE_MARKER, timestamp: Date.now() });
+                resumed++;
+            }
+            // 记录说要写、本地却没有这份数据：不猜测，更不能因此删远端
+        }
+        _resumingKeys.delete(key);
+    }
+    persistPendingKeys();
+    if (_pendingWrites.size === 0) return 0;
+    notifyPortableSyncStatus({ pending: _pendingWrites.size });
+    ensureSyncTimer();
+    resetIdleTimer();
+    await flushPortableSync();
+    return resumed;
+}
+
 export function portableSyncEnqueue(key, value, options = {}) {
     if (typeof window === 'undefined') return;
     if (window._isPortableSyncApplying) return;
@@ -229,6 +317,8 @@ export function portableSyncEnqueue(key, value, options = {}) {
         value: options.deleted ? DELETE_MARKER : value,
         timestamp: Date.now(),
     });
+    persistPendingKeys();
+    installLeaveFlush();
     notifyPortableSyncStatus({ pending: _pendingWrites.size });
     ensureSyncTimer();
     resetIdleTimer();
@@ -259,6 +349,15 @@ function assertWebDavConfig(config) {
     if (!config.endpoint) throw localizedError('请填写 WebDAV 地址', 'Please enter the WebDAV address.', 'Укажите адрес WebDAV.');
     if (!config.username) throw localizedError('请填写 WebDAV 账号', 'Please enter the WebDAV username.', 'Укажите имя пользователя WebDAV.');
     if (!config.password) throw localizedError('请填写 WebDAV 应用密码或授权码', 'Please enter the WebDAV app password or auth code.', 'Укажите пароль приложения или код авторизации WebDAV.');
+}
+
+function requestTooLargeMessage(bytes) {
+    const mb = (bytes / 1024 / 1024).toFixed(1);
+    return tt(
+        `这次要上传的数据约 ${mb} MB，超过了服务器允许的单次上传上限，没能推送到 WebDAV。`,
+        `This upload is about ${mb} MB, which exceeds the server's per-request limit, so it was not pushed to WebDAV.`,
+        `Объём загрузки около ${mb} МБ превышает лимит сервера на один запрос, поэтому данные не отправлены в WebDAV.`,
+    );
 }
 
 async function webdavProxy(action, config, extra = {}) {
@@ -297,7 +396,12 @@ async function webdavProxy(action, config, extra = {}) {
             requestChars: requestBody.length, ms: Date.now() - started,
         }, 'error');
         // 服务端拿不到界面语言，只能回中文兜底 + 机器码；这里按 code 出三语文案。
-        const error = new Error(localizeApiError(data, tt) || `WebDAV ${action} failed`);
+        // 前面的反向代理嫌请求体太大时直接回 HTML 413、没有机器码，不单独说明的话
+        // 用户只会看到一句 "WebDAV put failed"。
+        const message = res.status === 413 && !data.code
+            ? requestTooLargeMessage(utf8ByteLength(requestBody))
+            : localizeApiError(data, tt);
+        const error = new Error(message || `WebDAV ${action} failed`);
         error.code = data.code || '';
         error.upstreamStatus = data.upstreamStatus ?? null;
         throw error;
@@ -451,6 +555,7 @@ export async function flushPortableSync(options = {}) {
     _isSyncing = true;
     const entries = Array.from(_pendingWrites.entries());
     _pendingWrites.clear();
+    for (const [key, data] of entries) _inFlightWrites.set(key, data);
     notifyPortableSyncStatus({ syncing: true, pending: entries.length });
 
     const flushStarted = Date.now();
@@ -477,6 +582,8 @@ export async function flushPortableSync(options = {}) {
         .finally(() => {
             _isSyncing = false;
             _activeFlushPromise = null;
+            _inFlightWrites.clear(); // 失败的已经重新入队
+            persistPendingKeys();
         });
 
     try {
@@ -573,6 +680,12 @@ async function applyRemoteEntries(entries) {
             window._isAppForcePulling = false;
             window._isForcePullingBypass = false;
         }
+        // 这些 key 的本地内容已被导入的数据覆盖，之前没推完的旧版本不能再推回去。
+        for (const key of restoredKeys) {
+            _pendingWrites.delete(key);
+            _resumingKeys.delete(key);
+        }
+        persistPendingKeys();
     }
 
     // 恢复进来的条目带的是原设备的 updatedAt（比云端旧），照原样推会被云端判 stale
