@@ -145,59 +145,10 @@ A: Data is stored in your browser's IndexedDB and localStorage, independent of t
 ### Q: Can I use it on mobile/tablet?
 A: Yes. After deploying to a server, access `http://server-ip:3000` from any device's browser on the same network.
 
-### Q: Local models (Ollama, LM Studio, …) fail with "服务端默认禁止访问本机或内网地址" (server blocks loopback/LAN addresses)?
-A: To stop public instances from being used to probe internal networks, the Docker build blocks loopback and LAN addresses by default. For a deployment only you or people you trust use (e.g. on a NAS), follow these three steps.
+### Q: How do I connect a local model (Ollama, LM Studio, …)? What about "服务端默认禁止访问本机或内网地址" (loopback/LAN addresses blocked)?
+A: The Docker build blocks loopback and LAN addresses by default. For a deployment only you or people you trust use, add `AUTHOR_ALLOW_PRIVATE_NETWORK=1` to `.env` and run `docker compose up -d`.
 
-**Step 1: turn on the switch.** Add `AUTHOR_ALLOW_PRIVATE_NETWORK=1` to `.env` and apply it with `docker compose up -d`.
-
-⚠️ With this enabled, anyone who can open this Author page can make the server reach your LAN. Do not enable it on an instance exposed to the internet.
-
-**Step 2: let the model server accept LAN connections.** Both Ollama and LM Studio only accept local connections by default.
-
-| | Ollama | LM Studio |
-|---|---|---|
-| Default port | 11434 | 1234 |
-| Allow LAN connections | Set `OLLAMA_HOST=0.0.0.0` and restart Ollama; the official Docker image already allows them | Desktop app: turn on "Serve on Local Network" in the server settings on the Developer page. CLI: `lms server start --bind 0.0.0.0` |
-| Model name | The name shown by `ollama list`, e.g. `qwen3:8b` | The model identifier shown in LM Studio. If Author reports that the model is not found, load the model in LM Studio first |
-| API Key | Not needed, but the field in Author cannot be empty, so enter any placeholder such as `ollama` | Any placeholder unless "Require Authentication" is on; if it is, use the token LM Studio generated |
-
-**Step 3: enter the API address in Author.** Inside the container, `localhost` / `127.0.0.1` point at the container itself, so do not use them. Choose based on where the model runs:
-
-| Where the model runs | API address |
-|---|---|
-| Another computer on the LAN (typical for LM Studio) | That computer's LAN IP, e.g. `http://192.168.1.20:1234/v1`. Its firewall must allow that port |
-| Directly on the NAS (not in Docker) | The NAS's LAN IP, e.g. `http://192.168.1.10:11434/v1` |
-| In Docker on the NAS, in the same compose file as Author | The service name, e.g. `http://ollama:11434/v1` (see the next question) |
-
-### Q: Can the model also run on the NAS?
-A: Yes, and Ollama is the recommended choice there. It has an official Docker image and can go in the same compose file as Author. Ollama is then only reachable inside the compose network, so no port has to be opened to the LAN:
-
-```yaml
-services:
-  author-app:
-    image: yuanshijiloong/author:latest
-    container_name: author-studio
-    ports:
-      - "3000:3000"
-    environment:
-      - AUTHOR_ALLOW_PRIVATE_NETWORK=1
-    restart: unless-stopped
-
-  ollama:
-    image: ollama/ollama
-    volumes:
-      - ollama:/root/.ollama
-    restart: unless-stopped
-
-volumes:
-  ollama:
-```
-
-After starting, download a model with `docker compose exec ollama ollama pull qwen3:8b`. In Author, set the API address to `http://ollama:11434/v1`, the model to `qwen3:8b`, and any placeholder API key.
-
-LM Studio also has a headless server edition (llmster) that installs on Linux. It has no official Docker image, though, and is awkward to install on NAS systems such as Synology DSM, so Ollama is the better fit for a NAS.
-
-Also note that most NAS devices have no dedicated GPU and a modest CPU. They can only run small models of a few billion parameters, noticeably slower than a PC with a GPU. If you have a PC with a GPU, running the model there and pointing the Author instance on the NAS at it usually works better.
+Two more things matter: inside the container, `localhost` points at the container itself, so use the LAN IP of the machine running the model; and the model server must be set to accept other devices. For full steps, every deployment layout, running the model on the NAS, and common errors, see the [Local Model Guide](LOCAL_MODELS_EN.md).
 
 ### Q: Does it support HTTPS?
 A: Author does not include built-in HTTPS. Use a reverse proxy (Nginx, Caddy, or Traefik) in front to handle SSL certificates.
