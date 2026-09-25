@@ -485,6 +485,9 @@ By using Author, you agree to our **Privacy Policy** and **Terms of Service**. T
 
 ## 🙏 Acknowledgments
 
+### 🛡️ Community Contributors
+- [@inliver233](https://github.com/inliver233) — Reported several security issues with reproduction steps and proposed fixes, covering update-endpoint authentication, server-side request address validation, link and export-title escaping, and error-message sanitization. All of them have been fixed
+
 ### 🤖 AI Companions
 | Name | Role |
 |------|------|
