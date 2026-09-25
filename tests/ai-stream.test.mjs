@@ -78,6 +78,51 @@ test('timeout interrupts a blocked read and reports incomplete instead of cancel
     assert.equal(generationAbortResponse(lifecycle).status, 504);
 });
 
+test('a slow model that keeps producing output is not cut off by the timeout', async () => {
+    const lifecycle = createGenerationLifecycle(undefined, 40);
+    const upstream = new Response(new ReadableStream({
+        async start(c) {
+            for (let i = 0; i < 8; i++) {
+                await delay(15);
+                c.enqueue(encode(sse(openText(`片段${i}`))));
+            }
+            // 心跳注释同样说明上游还活着
+            for (let i = 0; i < 3; i++) {
+                await delay(15);
+                c.enqueue(encode(': keep-alive\n\n'));
+            }
+            c.enqueue(encode(sse({ choices: [{ delta: {}, finish_reason: 'stop' }] }) + sse('[DONE]')));
+            c.close();
+        },
+    }));
+    const result = await streamAiResponse(upstream, lifecycle, createOpenAiMapper()).text();
+    assert.match(result, /片段7/);
+    assert.match(result, /\[DONE\]/);
+    assert.doesNotMatch(result, /AI_GENERATION_TIMEOUT/);
+});
+
+test('silence after partial output still times out and keeps the partial text', async () => {
+    let cancelled = false;
+    const lifecycle = createGenerationLifecycle(undefined, 20);
+    const upstream = new Response(new ReadableStream({
+        start(c) { c.enqueue(encode(sse(openText('已写部分')))); },
+        cancel() { cancelled = true; },
+    }));
+    const result = await streamAiResponse(upstream, lifecycle, createOpenAiMapper()).text();
+    assert.match(result, /已写部分/);
+    assert.match(result, /AI_GENERATION_TIMEOUT/);
+    assert.doesNotMatch(result, /\[DONE\]/);
+    assert.equal(cancelled, true);
+});
+
+test('activity after a generation has finished does not restart its timer', async () => {
+    const lifecycle = createGenerationLifecycle(undefined, 10);
+    lifecycle.dispose();
+    lifecycle.touch();
+    await delay(30);
+    assert.equal(lifecycle.signal.aborted, false);
+});
+
 test('cancelling downstream aborts the upstream fetch signal and reader', async () => {
     let cancelled = false;
     const lifecycle = createGenerationLifecycle();

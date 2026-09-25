@@ -9,7 +9,7 @@ export function aiStreamError(code = 'AI_STREAM_INCOMPLETE') {
 
 // Demand-driven parsing: retain at most one input chunk and a bounded event,
 // and stop the underlying reader on abort or when the consumer leaves early.
-export async function* readSseData(body, { signal, maxEventChars = MAX_EVENT_CHARS } = {}) {
+export async function* readSseData(body, { signal, maxEventChars = MAX_EVENT_CHARS, onActivity } = {}) {
     signal?.throwIfAborted();
     if (!body) throw aiStreamError();
     const reader = body.getReader();
@@ -22,6 +22,8 @@ export async function* readSseData(body, { signal, maxEventChars = MAX_EVENT_CHA
             signal?.throwIfAborted();
             const { done, value } = await reader.read();
             signal?.throwIfAborted();
+            // 心跳注释也算上游还活着
+            if (!done && value?.length) onActivity?.();
             buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
             let end;
             while ((end = buffer.indexOf('\n')) !== -1) {
@@ -97,7 +99,7 @@ export function streamAiResponse(upstream, lifecycle, mapper, initialEvents = []
         try {
             lifecycle.signal.throwIfAborted();
             for (const event of initialEvents) yield event;
-            for await (const data of readSseData(upstream.body, { signal: lifecycle.signal })) {
+            for await (const data of readSseData(upstream.body, { signal: lifecycle.signal, onActivity: lifecycle.touch })) {
                 const { events = [], done = false, error } = mapper(data);
                 for (const event of events) yield event;
                 if (error) throw error;
