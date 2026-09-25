@@ -6,7 +6,7 @@ import { useI18n } from '../lib/useI18n';
 
 const RELEASE_API_URL = 'https://api.github.com/repos/YuanShiJiLoong/author/releases/latest';
 const RELEASE_PAGE_URL = 'https://github.com/YuanShiJiLoong/author/releases/latest';
-const QQ_GROUP_URL = 'https://qm.qq.com/q/wjRDkotw0E';
+const QQ_GROUP_URL = 'https://qm.qq.com/q/kSZyifQ1Ne';
 
 function createQrImageUrl(data, size = 160) {
     return `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&margin=8&data=${encodeURIComponent(data)}`;

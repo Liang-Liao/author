@@ -86,7 +86,7 @@
 
 - 📥 [下载 Author 安装包（Windows）](https://github.com/YuanShiJiLoong/author/releases/latest)
 - 📱 [下载 Author APK（Android）](https://github.com/YuanShiJiLoong/author/releases/latest)
-- 💬 无法访问 GitHub？加入 QQ 交流群：1080766359（2 群），群文件中下载
+- 💬 无法访问 GitHub？[加入 QQ 交流群：1080766359（2 群）](https://qm.qq.com/q/kSZyifQ1Ne)，群文件中下载
 
 安装即用，所有功能开箱即得。
 
@@ -179,7 +179,7 @@ NEXT_PUBLIC_BASE_PATH=/app
 
 前往 [Releases](https://github.com/YuanShiJiLoong/author/releases/latest) 页面下载最新版本安装包，覆盖安装。数据存储在浏览器/Electron 用户配置中；升级前请导出作品备份，并保留原有访问地址和用户数据目录。
 
-> 💬 无法访问 GitHub？加入 QQ 交流群：1080766359（2 群），群文件中下载最新版本。
+> 💬 无法访问 GitHub？[加入 QQ 交流群：1080766359（2 群）](https://qm.qq.com/q/kSZyifQ1Ne)，群文件中下载最新版本。
 
 ### 源码部署用户
 
@@ -537,8 +537,8 @@ Author 支持从多种格式导入设定集：**JSON / Markdown / TXT / DOCX / P
 
 ## 💬 社区交流
 
-- QQ 交流群：1080766359（Author 交流 2 群）
-- [QQ 交流群：1087016949（Author 交流 1 群，已满）](https://qm.qq.com/q/wjRDkotw0E)
+- [QQ 交流群：1080766359（Author 交流群 2）](https://qm.qq.com/q/kSZyifQ1Ne)
+- [QQ 交流群：1087016949（Author 交流群 1，已满）](https://qm.qq.com/q/wjRDkotw0E)
 - [GitHub Issues](https://github.com/YuanShiJiLoong/author/issues) — 问题反馈与功能建议
 
 ---
