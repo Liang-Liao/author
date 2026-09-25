@@ -241,6 +241,8 @@ Author supports multiple AI providers. Configure via **environment variables** o
 
 > 💡 **No API key required** for most editing features. AI features need at least one provider configured.
 
+> 🖥️ **Local models (Ollama, LM Studio, …):** choose **Custom compatible endpoint** and enter the model server's address (usually ending with `/v1`). For Docker / NAS setups and troubleshooting, see the [Local Model Guide](LOCAL_MODELS_EN.md).
+
 ---
 
 ## 🔍 Web Search Configuration

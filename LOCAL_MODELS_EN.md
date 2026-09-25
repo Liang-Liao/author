@@ -162,10 +162,12 @@ Adjust both sides:
 
 ### Generation time
 
-A single generation can run for at most 2 minutes; after that you will see "Generation timed out and is incomplete. Please retry." If the model is slow (e.g. a CPU-only NAS):
+As long as the model keeps producing output, a generation is never cut off, however long it takes. Only when the model produces nothing for 2 minutes straight do you see "Generation timed out and is incomplete. Please retry.", and the text written so far is kept.
 
+The wait is longest **before the first word appears**: the model has to read everything sent to it before it starts writing, so more text and a slower machine mean a longer wait. If it often times out before any text appears (e.g. on a CPU-only NAS):
+
+- Lower the limit in Author as described under [Context length](#context-length-the-most-common-pitfall), so the model has less to read.
 - Switch to a smaller model.
-- In **API Config**, check **Advanced Model Parameters**, then check **Max Output Tokens** and lower it so each reply is shorter.
 - The first request has to load the model into memory and is slower. If it times out the first time, try again.
 
 ## Optional: local embeddings for setting retrieval
@@ -189,6 +191,6 @@ With many settings, Author can use an embedding model to pick the settings most 
 | AI service error: … model … not found | Wrong model name, or the model is not downloaded / loaded | Pick it again with **Fetch model list from API**; for Ollama run `ollama pull` first, for LM Studio load the model first |
 | Could not fetch the model list | Wrong address, or no model is available yet | Check as for "Network connection failed"; make sure at least one model is downloaded |
 | Context too long / Input is too long | The request exceeds the model's limit | See [Context length](#context-length-the-most-common-pitfall) |
-| Generation timed out and is incomplete | The reply took more than 2 minutes | See [Generation time](#generation-time) |
+| Generation timed out and is incomplete | The model produced nothing for 2 minutes, usually before the first word | See [Generation time](#generation-time) |
 | Generation was interrupted and is incomplete | The model server dropped the connection, often from running out of memory or unloading the model | Check the model server's logs; use a smaller model or a shorter context length |
 | Replies work, but the AI ignores settings or forgets earlier text | Input was silently cut off by the model | See [Context length](#context-length-the-most-common-pitfall) |
