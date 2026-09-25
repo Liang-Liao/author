@@ -5,6 +5,7 @@
 import { Agent } from 'undici';
 import {
     assertSafeOutboundUrl,
+    isPrivateNetworkAllowedByDeployment,
     OutboundRequestBlockedError,
     redactSensitiveText,
     rejectOfficialProxy,
@@ -68,9 +69,11 @@ export async function proxyFetch(url, options = {}, proxyUrl, policy = {}) {
     options.signal?.throwIfAborted();
     // Electron's proxy.js gate authenticates every request with a per-launch
     // HttpOnly capability before route code can run. Other deployments stay
-    // public-network-only unless a narrowly scoped caller opts in.
+    // public-network-only unless a narrowly scoped caller opts in, or a trusted
+    // self-hosted operator sets AUTHOR_ALLOW_PRIVATE_NETWORK (ignored on official web).
     const allowPrivateNetwork = policy?.allowPrivateNetwork === true
-        || Boolean(process.env.AUTHOR_DESKTOP_CAPABILITY);
+        || Boolean(process.env.AUTHOR_DESKTOP_CAPABILITY)
+        || isPrivateNetworkAllowedByDeployment();
     if (!allowPrivateNetwork) {
         rejectOfficialProxy(proxyUrl);
         if (String(proxyUrl || '').trim()) {

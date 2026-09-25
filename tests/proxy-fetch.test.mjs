@@ -9,8 +9,13 @@ const securityUrl = new URL('../app/lib/server-security.mjs', import.meta.url);
 const endpoint = 'https://api.example.test/v1';
 let instance = 0;
 
-async function fixture(t, { agent = class {}, lookup = async () => [{ address: '93.184.216.34', family: 4 }] } = {}) {
-    for (const [name, value] of [['AUTHOR_DESKTOP_CAPABILITY', undefined], ['NEXT_PUBLIC_DEPLOYMENT_TARGET', 'official-web']]) {
+async function fixture(t, { agent = class {}, lookup = async () => [{ address: '93.184.216.34', family: 4 }], env = {} } = {}) {
+    for (const [name, value] of Object.entries({
+        AUTHOR_DESKTOP_CAPABILITY: undefined,
+        AUTHOR_ALLOW_PRIVATE_NETWORK: undefined,
+        NEXT_PUBLIC_DEPLOYMENT_TARGET: 'official-web',
+        ...env,
+    })) {
         const previous = process.env[name];
         if (value === undefined) delete process.env[name];
         else process.env[name] = value;
@@ -218,6 +223,32 @@ test('an explicitly trusted private endpoint still works', async t => {
     const result = await proxyFetch('http://127.0.0.1:8000/v1', {}, undefined, { allowPrivateNetwork: true });
     assert.equal(await result.text(), 'local model');
     assert.equal(fetch.mock.callCount(), 1);
+});
+
+test('self-hosted operators can opt in to LAN and loopback model endpoints', async t => {
+    const { proxyFetch } = await fixture(t, { env: { NEXT_PUBLIC_DEPLOYMENT_TARGET: undefined, AUTHOR_ALLOW_PRIVATE_NETWORK: '1' } });
+    const fetch = t.mock.method(globalThis, 'fetch', async () => new Response('local model'));
+    for (const url of ['http://192.168.1.10:11434/v1', 'http://host.docker.internal:1234/v1', 'http://127.0.0.1:8000/v1']) {
+        assert.equal(await (await proxyFetch(url)).text(), 'local model');
+    }
+    assert.equal(fetch.mock.callCount(), 3);
+});
+
+test('self-hosted builds stay public-only without the opt-in and say how to enable it', async t => {
+    const { proxyFetch } = await fixture(t, { env: { NEXT_PUBLIC_DEPLOYMENT_TARGET: undefined } });
+    const fetch = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Must not fetch'); });
+    await assert.rejects(proxyFetch('http://192.168.1.10:11434/v1'), error => blocked(error)
+        && error.message.includes('AUTHOR_ALLOW_PRIVATE_NETWORK'));
+    assert.equal(fetch.mock.callCount(), 0);
+});
+
+test('the official web build ignores the private-network opt-in', async t => {
+    const { proxyFetch } = await fixture(t, { env: { AUTHOR_ALLOW_PRIVATE_NETWORK: '1' } });
+    const fetch = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Must not fetch'); });
+    await assert.rejects(proxyFetch('http://192.168.1.10:11434/v1'), error => blocked(error)
+        && !error.message.includes('AUTHOR_ALLOW_PRIVATE_NETWORK'));
+    await assert.rejects(proxyFetch(endpoint, {}, 'http://127.0.0.1:8888'), blocked);
+    assert.equal(fetch.mock.callCount(), 0);
 });
 
 test('actual fetch and installed Agent cannot follow a synthetic public hop into loopback', async t => {

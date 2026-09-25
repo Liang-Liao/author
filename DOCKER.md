@@ -142,6 +142,15 @@ A: 数据存储在浏览器的 IndexedDB 和 localStorage 中，与容器无关�
 ### Q: 可以在手机/平板上使用吗？
 A: 可以。部署到服务器后，在同一局域网内用手机浏览器访问 `http://服务器IP:3000` 即可。
 
+### Q: 连本地模型（Ollama、LM Studio 等）提示"服务端默认禁止访问本机或内网地址"？
+A: 为了防止公开实例被人借来探测内网，Docker 版默认不允许服务端连接本机或局域网地址。如果是自己或信任的人使用的部署（例如放在 NAS 上），按下面三步设置：
+
+1. 在 `.env` 里加一行 `AUTHOR_ALLOW_PRIVATE_NETWORK=1`，然后执行 `docker compose up -d` 让它生效。
+2. API 地址不要填 `localhost` 或 `127.0.0.1`，因为在容器里这两个地址指向容器自己。请改填 NAS 或电脑的局域网 IP，例如 `http://192.168.1.10:11434/v1`。如果模型就跑在同一台机器上，也可以在 compose 里给 `author-app` 加上 `extra_hosts: ["host.docker.internal:host-gateway"]`，然后填 `http://host.docker.internal:11434/v1`。
+3. Ollama 默认只监听本机，需要设置环境变量 `OLLAMA_HOST=0.0.0.0` 并重启，别的设备才能连上。本地模型不需要 Key，但 API Key 一栏不能留空，随便填一个即可，例如 `ollama`。
+
+⚠️ 开启后，任何能打开这个 Author 页面的人都能让服务器去访问你的局域网。因此公开到外网的实例不要开启。
+
 ### Q: 支持 HTTPS 吗？
 A: Author 本身不内置 HTTPS。建议在前面加一层反向代理（如 Nginx、Caddy 或 Traefik），由反向代理处理 SSL 证书。
 

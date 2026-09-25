@@ -145,6 +145,15 @@ A: Data is stored in your browser's IndexedDB and localStorage, independent of t
 ### Q: Can I use it on mobile/tablet?
 A: Yes. After deploying to a server, access `http://server-ip:3000` from any device's browser on the same network.
 
+### Q: Local models (Ollama, LM Studio, …) fail with "服务端默认禁止访问本机或内网地址" (server blocks loopback/LAN addresses)?
+A: To stop public instances from being used to probe internal networks, the Docker build blocks loopback and LAN addresses by default. For a deployment only you or people you trust use (e.g. on a NAS):
+
+1. Add `AUTHOR_ALLOW_PRIVATE_NETWORK=1` to `.env` and apply it with `docker compose up -d`.
+2. Do not use `localhost` / `127.0.0.1` as the API address, because inside the container they point at the container itself. Use the LAN IP of your NAS or PC instead, e.g. `http://192.168.1.10:11434/v1`. If the model runs on the same machine, you can also add `extra_hosts: ["host.docker.internal:host-gateway"]` to `author-app` in the compose file and use `http://host.docker.internal:11434/v1`.
+3. Ollama only listens on localhost by default. Set `OLLAMA_HOST=0.0.0.0` and restart it so other devices can connect. Local models need no key, but the API Key field cannot be empty, so enter any placeholder such as `ollama`.
+
+⚠️ With this enabled, anyone who can open this Author page can make the server reach your LAN. Do not enable it on an instance exposed to the internet.
+
 ### Q: Does it support HTTPS?
 A: Author does not include built-in HTTPS. Use a reverse proxy (Nginx, Caddy, or Traefik) in front to handle SSL certificates.
 

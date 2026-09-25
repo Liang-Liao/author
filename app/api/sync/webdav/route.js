@@ -1,7 +1,7 @@
 import { withApiResources } from '../../../lib/api-resource-guard.js';
 import { NextResponse } from 'next/server';
 import { proxyFetch } from '../../../lib/proxy-fetch';
-import { isAuthorizedDesktopRequest, isOutboundRequestBlocked, redactSensitiveText } from '../../../lib/server-security.mjs';
+import { isAuthorizedDesktopRequest, isOutboundRequestBlocked, isPrivateNetworkAllowedByDeployment, redactSensitiveText } from '../../../lib/server-security.mjs';
 
 export const runtime = 'nodejs';
 
@@ -208,7 +208,7 @@ async function handlePOST(request) {
         const payload = await request.json();
         action = String(payload?.action || '');
         const result = await proxyWebDav(payload || {}, {
-            allowPrivateNetwork: isAuthorizedDesktopRequest(request),
+            allowPrivateNetwork: isAuthorizedDesktopRequest(request) || isPrivateNetworkAllowedByDeployment(),
         });
         if (!result.ok) {
             const failure = upstreamFailure(result);

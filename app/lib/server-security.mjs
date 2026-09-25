@@ -25,6 +25,17 @@ export function isOfficialWebServer() {
     return OFFICIAL_WEB;
 }
 
+// 可信自部署（如 NAS 上的 Docker）连同机/局域网的本地模型、WebDAV 用。
+// 部署者显式开启才生效；官网构建一律忽略。
+export function isPrivateNetworkAllowedByDeployment() {
+    if (OFFICIAL_WEB) return false;
+    return /^(1|true)$/i.test(String(process.env.AUTHOR_ALLOW_PRIVATE_NETWORK || '').trim());
+}
+
+const PRIVATE_NETWORK_BLOCKED_MESSAGE = OFFICIAL_WEB
+    ? '服务端默认禁止访问本机或内网地址'
+    : '服务端默认禁止访问本机或内网地址；自部署需连接本地模型时，请设置环境变量 AUTHOR_ALLOW_PRIVATE_NETWORK=1 后重启';
+
 function constantTimeEqual(left, right) {
     const a = Buffer.from(String(left || ''), 'utf8');
     const b = Buffer.from(String(right || ''), 'utf8');
@@ -189,10 +200,10 @@ export async function assertSafeOutboundUrl(rawUrl, options = {}) {
     if (options.allowPrivateNetwork === true) return parsed;
     const hostname = normalizedIp(parsed.hostname);
     if (hostname === 'localhost' || BLOCKED_HOST_SUFFIXES.some(suffix => hostname.endsWith(suffix))) {
-        throw new OutboundRequestBlockedError('服务端默认禁止访问本机或内网地址');
+        throw new OutboundRequestBlockedError(PRIVATE_NETWORK_BLOCKED_MESSAGE);
     }
     if (isIP(hostname) && !isPublicIpAddress(hostname)) {
-        throw new OutboundRequestBlockedError('服务端默认禁止访问本机或内网地址');
+        throw new OutboundRequestBlockedError(PRIVATE_NETWORK_BLOCKED_MESSAGE);
     }
     await lookupPublicAddresses(parsed.hostname);
     return parsed;
