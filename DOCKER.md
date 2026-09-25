@@ -143,13 +143,58 @@ A: 数据存储在浏览器的 IndexedDB 和 localStorage 中，与容器无关�
 A: 可以。部署到服务器后，在同一局域网内用手机浏览器访问 `http://服务器IP:3000` 即可。
 
 ### Q: 连本地模型（Ollama、LM Studio 等）提示"服务端默认禁止访问本机或内网地址"？
-A: 为了防止公开实例被人借来探测内网，Docker 版默认不允许服务端连接本机或局域网地址。如果是自己或信任的人使用的部署（例如放在 NAS 上），按下面三步设置：
+A: 为了防止公开实例被人借来探测内网，Docker 版默认不允许服务端连接本机或局域网地址。自己或信任的人使用的部署（例如放在 NAS 上）按下面三步设置。
 
-1. 在 `.env` 里加一行 `AUTHOR_ALLOW_PRIVATE_NETWORK=1`，然后执行 `docker compose up -d` 让它生效。
-2. API 地址不要填 `localhost` 或 `127.0.0.1`，因为在容器里这两个地址指向容器自己。请改填 NAS 或电脑的局域网 IP，例如 `http://192.168.1.10:11434/v1`。如果模型就跑在同一台机器上，也可以在 compose 里给 `author-app` 加上 `extra_hosts: ["host.docker.internal:host-gateway"]`，然后填 `http://host.docker.internal:11434/v1`。
-3. Ollama 默认只监听本机，需要设置环境变量 `OLLAMA_HOST=0.0.0.0` 并重启，别的设备才能连上。本地模型不需要 Key，但 API Key 一栏不能留空，随便填一个即可，例如 `ollama`。
+**第一步：打开开关。** 在 `.env` 里加一行 `AUTHOR_ALLOW_PRIVATE_NETWORK=1`，然后执行 `docker compose up -d` 让它生效。
 
 ⚠️ 开启后，任何能打开这个 Author 页面的人都能让服务器去访问你的局域网。因此公开到外网的实例不要开启。
+
+**第二步：让模型允许局域网连接。** Ollama 和 LM Studio 默认都只让本机连接。
+
+| | Ollama | LM Studio |
+|---|---|---|
+| 默认端口 | 11434 | 1234 |
+| 允许局域网连接 | 设置环境变量 `OLLAMA_HOST=0.0.0.0` 后重启 Ollama；用官方 Docker 镜像时已默认允许 | 桌面版：在 Developer 页的服务器设置里打开 "Serve on Local Network"；命令行：`lms server start --bind 0.0.0.0` |
+| 模型名 | `ollama list` 里显示的名字，例如 `qwen3:8b` | LM Studio 里显示的模型标识；提示找不到模型时，先在 LM Studio 里把模型加载好 |
+| API Key | 不需要，但 Author 里这一栏不能空着，随便填一个，例如 `ollama` | 没开 "Require Authentication" 时随便填一个；开了就填 LM Studio 生成的令牌 |
+
+**第三步：在 Author 里填 API 地址。** 容器里的 `localhost` / `127.0.0.1` 指向容器自己，不能这样填。按模型跑在哪里来填：
+
+| 模型跑在哪里 | API 地址填什么 |
+|---|---|
+| 局域网里的另一台电脑（LM Studio 最常见） | 那台电脑的局域网 IP，例如 `http://192.168.1.20:1234/v1`。电脑的防火墙要放行这个端口 |
+| NAS 本机（直接安装，不在 Docker 里） | NAS 的局域网 IP，例如 `http://192.168.1.10:11434/v1` |
+| NAS 上的 Docker，和 Author 写在同一个 compose 里 | 服务名，例如 `http://ollama:11434/v1`（见下一问） |
+
+### Q: 能把模型也装在 NAS 上吗？
+A: 能，推荐用 Ollama。它有官方 Docker 镜像，可以和 Author 写进同一个 compose。这样 Ollama 只在 compose 内部可见，不用对局域网开放端口：
+
+```yaml
+services:
+  author-app:
+    image: yuanshijiloong/author:latest
+    container_name: author-studio
+    ports:
+      - "3000:3000"
+    environment:
+      - AUTHOR_ALLOW_PRIVATE_NETWORK=1
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama
+    volumes:
+      - ollama:/root/.ollama
+    restart: unless-stopped
+
+volumes:
+  ollama:
+```
+
+启动后下载模型：`docker compose exec ollama ollama pull qwen3:8b`。然后在 Author 里填 API 地址 `http://ollama:11434/v1`，模型名 `qwen3:8b`，API Key 随便填。
+
+LM Studio 也有不带界面的服务器版（llmster），Linux 上能装，但官方没有 Docker 镜像，在群晖等 NAS 系统上安装比较麻烦，所以 NAS 上更推荐 Ollama。
+
+另外，大多数 NAS 没有独立显卡，CPU 也偏弱，只适合跑几 B 参数的小模型，速度会明显比有显卡的电脑慢。如果家里有带显卡的电脑，把模型放在电脑上，让 NAS 上的 Author 去连，通常体验更好。
 
 ### Q: 支持 HTTPS 吗？
 A: Author 本身不内置 HTTPS。建议在前面加一层反向代理（如 Nginx、Caddy 或 Traefik），由反向代理处理 SSL 证书。
