@@ -152,6 +152,7 @@ AI 会自动参考：
 | **Base URL** | 接口地址（切换提供商时会自动填写默认地址） |
 | **模型选择** | 点击「从 API 拉取模型列表」自动更新当前可用的大模型库供你选择；已保存但本次未返回的模型会标记为「未返回」，可手动清理 |
 | **独立向量API** | 配置专用 Embedding 模型，并选择是否复用聊天 Key。嵌入服务不要求 Key 时，关闭复用后可留空嵌入 Key |
+| **本地模型** | Ollama、LM Studio 等选「自定义兼容端点」，地址一般以 \`/v1\` 结尾，API Key 随便填一个。Docker / NAS 部署的设置见 [本地模型连接指南](https://github.com/YuanShiJiLoong/author/blob/main/LOCAL_MODELS.md) |
 | **高级模型参数** | 支持开启并独立覆盖 Temperature、Top P、推理思考强度 (Reasoning Effort) 等高级调度参数 |
 
 ### ⚡ Token 级智能缓存
@@ -822,6 +823,7 @@ This is the foundation of the AI assistant. API keys are stored in **local brows
 | **Base URL** | API endpoint. Switching provider fills the default address automatically |
 | **Model Selection** | Click **Fetch model list from API** to refresh available models. Saved models missing from the latest response are marked **Not returned** and can be cleared manually |
 | **Independent Vector API** | Configure a dedicated embedding model and choose whether to reuse the chat key. If the embedding service requires no key, disable key reuse and leave the embedding key blank |
+| **Local models** | For Ollama, LM Studio and similar, choose **Custom compatible endpoint**; the address usually ends with \`/v1\`, and any placeholder API key works. For Docker / NAS setups, see the [Local Model Guide](https://github.com/YuanShiJiLoong/author/blob/main/LOCAL_MODELS_EN.md) |
 | **Advanced Model Params** | Independently override Temperature, Top P, Reasoning Effort, and other advanced parameters |
 
 ### Token-level Smart Cache
@@ -1484,6 +1486,7 @@ Author — **платформа письма с ИИ** для авторов п�
 | **Base URL** | Адрес API; при смене провайдера заполняется автоматически |
 | **Модель** | Список моделей можно подтянуть из API; сохраненные, но не вернувшиеся модели помечаются отдельно |
 | **Отдельный Vector API** | Отдельная embedding-модель с выбором, использовать ли ключ чата. Если сервис не требует ключа, отключите его повторное использование и оставьте поле ключа embedding пустым |
+| **Локальные модели** | Для Ollama, LM Studio и подобных выберите **Custom compatible endpoint**; адрес обычно заканчивается на \`/v1\`, в поле API Key можно ввести любое значение. Настройка для Docker / NAS — в [руководстве по локальным моделям](https://github.com/YuanShiJiLoong/author/blob/main/LOCAL_MODELS_EN.md) (на английском) |
 | **Расширенные параметры** | Temperature, Top P, Reasoning Effort и другие настройки |
 
 ### Token cache

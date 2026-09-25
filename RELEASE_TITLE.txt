@@ -1,1 +1,1 @@
-改进 AI 参考、模型设置与发布稳定性 | Improved AI references, model settings, and release reliability
+支持连接局域网本地模型，改进同步与长时间生成 | Local models on your LAN, more reliable sync, and uninterrupted long generations
